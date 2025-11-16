@@ -22,6 +22,21 @@ CSV_RELATIVE_PATH = "data/apod_data.csv"
 DVC_FILE_PATH = f"{CSV_RELATIVE_PATH}.dvc"
 
 
+# --- Helper Function for Git ---
+def run_git_command(command, check=True):
+    """Helper to run a shell command from the project root."""
+    try:
+        subprocess.run(
+            command,
+            check=check,
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Git command failed: {e.stderr}")
+        raise
+
 # --- DAG Definition ---
 @dag(
     dag_id="nasa_apod_pipeline",
@@ -36,11 +51,11 @@ def apod_pipeline():
     2. Transform: Clean and structure data into a Pandas DataFrame.
     3. Load (Postgres): Load DataFrame into a Postgres table.
     4. Load (CSV): Save DataFrame to a local CSV file.
-    5. Version (DVC): Run 'dvc add' on the new CSV file.
+    5. Version (DVC): Initialize Git & DVC, then run 'dvc add'.
     6. Version (Git): Commit and push the .dvc metadata file to GitHub.
     """
 
-    # --- Task 1: Data Extraction (E) ---
+    # --- Tasks 1-3 (Unchanged) ---
     @task
     def extract_apod_data():
         print("--- Task 1: Fetching data from NASA API ---")
@@ -48,7 +63,6 @@ def apod_pipeline():
         response.raise_for_status()
         return response.json()
 
-    # --- Task 2: Data Transformation (T) ---
     @task
     def transform_apod_data(raw_data: dict) -> pd.DataFrame:
         print("--- Task 2: Transforming data into DataFrame ---")
@@ -57,7 +71,6 @@ def apod_pipeline():
         df['date'] = pd.to_datetime(df['date'])
         return df
 
-    # --- Task 3a: Data Loading (L) - Postgres ---
     @task
     def load_to_postgres(df: pd.DataFrame):
         print("--- Task 3a: Loading data to Postgres ---")
@@ -74,38 +87,54 @@ def apod_pipeline():
         df.to_sql('apod_data', con=engine, if_exists='replace', index=False)
         print("Successfully loaded data to Postgres.")
 
-    # --- Task 3b: Data Loading (L) - CSV ---
     @task
     def load_to_csv(df: pd.DataFrame):
         print("--- Task 3b: Saving data to CSV ---")
         os.makedirs(CSV_DIR, exist_ok=True)
         df.to_csv(CSV_PATH, index=False)
         print(f"Successfully saved data to {CSV_PATH}")
-        # Return the *relative* path for DVC
         return CSV_RELATIVE_PATH
 
     # --- Task 4: Data Versioning (DVC) ---
     @task
     def version_data_with_dvc(relative_csv_path: str):
         """
-        Runs 'dvc add' on the CSV file.
-        Uses subprocess to run shell commands from the project root.
+        Initializes the Git repo inside the container, pulls DVC config,
+        and then runs 'dvc add' on the CSV file.
         """
-        print("--- Task 4: Versioning data with DVC ---")
-        try:
-            # Run 'dvc add'
-            subprocess.run(
-                ["dvc", "add", relative_csv_path],
-                check=True,  # Fail the task if DVC fails
-                cwd=PROJECT_ROOT,  # Run from the project root
-                capture_output=True,
-                text=True
-            )
-            print(f"Successfully ran 'dvc add {relative_csv_path}'")
-            return DVC_FILE_PATH
-        except subprocess.CalledProcessError as e:
-            print(f"DVC add failed: {e.stderr}")
-            raise
+        print("--- Task 4: Initializing Git Repo and Versioning data with DVC ---")
+        
+        # Get GitHub credentials
+        github_pat = Variable.get("GITHUB_PAT")
+        github_user = Variable.get("GITHUB_USER")
+        github_repo = Variable.get("GITHUB_REPO_URL")
+        push_url = f"https://{github_user}:{github_pat}@{github_repo}"
+
+        # 1. Check if .git exists. If not, initialize the repo.
+        if not os.path.exists(os.path.join(PROJECT_ROOT, ".git")):
+            print("No .git directory found. Initializing Git repo...")
+            run_git_command(['git', 'init', '-b', 'main'])
+            run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'])
+            run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'])
+            run_git_command(['git', 'remote', 'add', 'origin', push_url])
+            
+            # Pull the .dvc folder from the repo
+            try:
+                # We use pull --allow-unrelated-histories in case the init created a different root
+                run_git_command(['git', 'pull', 'origin', 'main', '--allow-unrelated-histories'])
+                print("Successfully pulled .dvc config from repo.")
+            except subprocess.CalledProcessError as e:
+                print(f"Git pull failed (maybe new repo?): {e.stderr}")
+                # We need to run dvc init if the pull failed to bring it
+                if not os.path.exists(os.path.join(PROJECT_ROOT, ".dvc")):
+                    print("No .dvc folder. Running 'dvc init'...")
+                    run_git_command(['dvc', 'init'])
+        
+        # 2. Now, run 'dvc add'
+        print(f"Running 'dvc add {relative_csv_path}'")
+        run_git_command(['dvc', 'add', relative_csv_path])
+        print("Successfully ran 'dvc add'")
+        return DVC_FILE_PATH
 
     # --- Task 5: Code Versioning (Git/GitHub) ---
     @task
@@ -115,53 +144,42 @@ def apod_pipeline():
         """
         print("--- Task 5: Committing .dvc file to Git ---")
         
-        # Get GitHub credentials from Airflow Variables
+        # Get GitHub credentials
         github_pat = Variable.get("GITHUB_PAT")
         github_user = Variable.get("GITHUB_USER")
         github_repo = Variable.get("GITHUB_REPO_URL")
-        
-        # Construct the authenticated Git URL
         push_url = f"https://{github_user}:{github_pat}@{github_repo}"
 
-        try:
-            # 1. Configure Git user
-            subprocess.run(['git', 'config', '--global', 'user.email', 'airflow@example.com'], cwd=PROJECT_ROOT, check=True)
-            subprocess.run(['git', 'config', '--global', 'user.name', 'Airflow-Bot'], cwd=PROJECT_ROOT, check=True)
-            
-            # 2. Add the .dvc file (NOT the .csv)
-            subprocess.run(['git', 'add', dvc_file], cwd=PROJECT_ROOT, check=True)
-            
-            # 3. Commit
-            commit_message = f"Data: Update APOD data for {pendulum.today().to_date_string()}"
-            # Check if there's anything to commit
-            status_result = subprocess.run(['git', 'status', '--porcelain'], cwd=PROJECT_ROOT, capture_output=True, text=True)
-            if dvc_file not in status_result.stdout:
-                print("No data changes to commit.")
-                return
+        # Git config should be set by the previous task, but we check
+        run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'], check=False)
+        run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'], check=False)
 
-            subprocess.run(['git', 'commit', '-m', commit_message], cwd=PROJECT_ROOT, check=True)
-            
-            # 4. Push to GitHub
-            subprocess.run(['git', 'push', push_url, 'main'], cwd=PROJECT_ROOT, check=True)
-            print(f"Successfully committed and pushed {dvc_file} to GitHub.")
-            
-        except subprocess.CalledProcessError as e:
-            print(f"Git operation failed: {e.stderr}")
-            raise
+        # 1. Add the .dvc file
+        run_git_command(['git', 'add', dvc_file])
+        
+        # 2. Commit
+        commit_message = f"Data: Update APOD data for {pendulum.today().to_date_string()}"
+        # Check if there's anything to commit
+        status_result = subprocess.run(['git', 'status', '--porcelain'], cwd=PROJECT_ROOT, capture_output=True, text=True)
+        if dvc_file not in status_result.stdout:
+            print("No data changes to commit.")
+            return
+
+        run_git_command(['git', 'commit', '-m', commit_message])
+        
+        # 3. Push to GitHub
+        run_git_command(['git', 'push', push_url, 'main'])
+        print(f"Successfully committed and pushed {dvc_file} to GitHub.")
 
     # --- Define Task Dependencies ---
     raw_data = extract_apod_data()
     clean_df = transform_apod_data(raw_data)
     
-    # Load tasks
     pg_load_task = load_to_postgres(clean_df)
-    csv_path_task = load_to_csv(clean_df) # This task returns the path
+    csv_path_task = load_to_csv(clean_df)
 
-    # Versioning tasks
     dvc_file_task = version_data_with_dvc(csv_path_task)
     
-    # Final Git task
-    # It depends on both the Postgres and DVC tasks succeeding
     git_task = version_code_with_git(dvc_file_task)
     git_task.set_upstream(pg_load_task)
 
