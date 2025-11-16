@@ -1,5 +1,3 @@
-
-
 import pendulum
 import requests
 import pandas as pd
@@ -26,14 +24,23 @@ DVC_FILE_PATH = f"{CSV_RELATIVE_PATH}.dvc"
 def run_git_command(command, check=True):
     """Helper to run a shell command from the project root."""
     try:
-        subprocess.run(
+        # We capture output to prevent secrets from being in the *main* log
+        # but they might still appear if the command fails, as seen in previous logs.
+        result = subprocess.run(
             command,
             check=check,
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True
         )
+        # Log stdout/stderr for debugging non-secret commands
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr)
+        
     except subprocess.CalledProcessError as e:
+        # Print stderr on failure for debugging, but be aware of secrets
         print(f"Git command failed: {e.stderr}")
         raise
 
@@ -51,8 +58,7 @@ def apod_pipeline():
     2. Transform: Clean and structure data into a Pandas DataFrame.
     3. Load (Postgres): Load DataFrame into a Postgres table.
     4. Load (CSV): Save DataFrame to a local CSV file.
-    5. Version (DVC): Initialize Git & DVC, then run 'dvc add'.
-    6. Version (Git): Commit and push the .dvc metadata file to GitHub.
+    5. Version (Git/DVC): Version data with DVC and push .dvc file to Git.
     """
 
     # --- Tasks 1-3 (Unchanged) ---
@@ -117,7 +123,8 @@ def apod_pipeline():
             run_git_command(['git', 'init', '-b', 'main'])
             run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'])
             run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'])
-            run_git_command(['git', 'remote', 'add', 'origin', push_url])
+            # Don't add the remote with the PAT here, we set it below
+            run_git_command(['git', 'remote', 'add', 'origin', f"https://{github_repo}"])
         
         # 3. Set remote URL (in case it's wrong) and STASH
         # This is the fix for the "untracked files" error
@@ -131,7 +138,7 @@ def apod_pipeline():
             run_git_command(['git', 'pull', 'origin', 'main', '--rebase'])
             print("Successfully pulled and rebased.")
         except subprocess.CalledProcessError as e:
-            if "couldn't find remote ref main" in e.stderr:
+            if "couldn't find remote ref main" in str(e): # Check stderr in string
                 print("Remote 'main' branch probably doesn't exist yet. Skipping pull.")
             else:
                 print(f"Git pull failed: {e.stderr}")
@@ -159,6 +166,7 @@ def apod_pipeline():
         print("Pushing commit to GitHub...")
         run_git_command(['git', 'push', 'origin', 'main'])
         print(f"Successfully committed and pushed {DVC_FILE_PATH} to GitHub.")
+
 
     # --- Define Task Dependencies ---
     raw_data = extract_apod_data()
