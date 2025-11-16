@@ -24,8 +24,6 @@ DVC_FILE_PATH = f"{CSV_RELATIVE_PATH}.dvc"
 def run_git_command(command, check=True):
     """Helper to run a shell command from the project root."""
     try:
-        # We capture output to prevent secrets from being in the *main* log
-        # but they might still appear if the command fails, as seen in previous logs.
         result = subprocess.run(
             command,
             check=check,
@@ -33,14 +31,12 @@ def run_git_command(command, check=True):
             capture_output=True,
             text=True
         )
-        # Log stdout/stderr for debugging non-secret commands
         if result.stdout:
             print(result.stdout)
         if result.stderr:
             print(result.stderr)
         
     except subprocess.CalledProcessError as e:
-        # Print stderr on failure for debugging, but be aware of secrets
         print(f"Git command failed: {e.stderr}")
         raise
 
@@ -105,9 +101,9 @@ def apod_pipeline():
     @task
     def version_data_and_code(relative_csv_path: str):
         """
-        Initializes Git, stashes local files, pulls, runs dvc add,
-        commits, and pushes the .dvc file.
-        This combines both versioning tasks to avoid Git conflicts.
+        Initializes Git, fetches and hard resets from remote,
+        runs dvc add, commits, and pushes the .dvc file.
+        This robustly handles the Git state in the worker.
         """
         print("--- Task 4/5: Versioning Data and Pushing to Git ---")
         
@@ -123,25 +119,29 @@ def apod_pipeline():
             run_git_command(['git', 'init', '-b', 'main'])
             run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'])
             run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'])
-            # Don't add the remote with the PAT here, we set it below
             run_git_command(['git', 'remote', 'add', 'origin', f"https://{github_repo}"])
         
-        # 3. Set remote URL (in case it's wrong) and STASH
-        # This is the fix for the "untracked files" error
-        print("Setting remote URL and stashing local files...")
+        # 3. Set remote URL (ensures it's correct and has PAT)
+        print("Setting remote URL...")
         run_git_command(['git', 'remote', 'set-url', 'origin', push_url])
-        run_git_command(['git', 'stash', '--include-untracked'], check=False)
-
-        # 4. Pull latest changes
-        print("Pulling latest changes from origin/main with rebase...")
+        
+        # 4. Pull latest changes by fetching and resetting
+        # This is a robust way to overwrite local "untracked" files
+        print("Fetching from origin and resetting to main...")
         try:
-            run_git_command(['git', 'pull', 'origin', 'main', '--rebase'])
-            print("Successfully pulled and rebased.")
+            run_git_command(['git', 'fetch', 'origin'])
+            run_git_command(['git', 'reset', '--hard', 'origin/main'])
+            print("Successfully reset local repo to origin/main.")
         except subprocess.CalledProcessError as e:
-            if "couldn't find remote ref main" in str(e): # Check stderr in string
-                print("Remote 'main' branch probably doesn't exist yet. Skipping pull.")
+            # This is the expected error if the remote repo is brand new
+            if "couldn't find remote ref main" in str(e) or "invalid path 'origin/main'" in str(e):
+                print("Remote 'main' branch probably doesn't exist yet. Skipping reset.")
+                # If the remote is empty, we must run 'dvc init'
+                if not os.path.exists(os.path.join(PROJECT_ROOT, ".dvc")):
+                    print("No .dvc folder. Running 'dvc init'...")
+                    run_git_command(['dvc', 'init'])
             else:
-                print(f"Git pull failed: {e.stderr}")
+                print(f"Git fetch/reset failed: {e.stderr}")
                 raise
 
         # 5. Run 'dvc add'
@@ -175,7 +175,7 @@ def apod_pipeline():
     pg_load_task = load_to_postgres(clean_df)
     csv_path_task = load_to_csv(clean_df)
 
-    # NEW: Call the single, combined task
+    # Call the single, combined task
     version_task = version_data_and_code(csv_path_task)
     
     # Make sure versioning only happens after the CSV and PG load are done
