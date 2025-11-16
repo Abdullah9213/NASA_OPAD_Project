@@ -99,10 +99,10 @@ def apod_pipeline():
     @task
     def version_data_with_dvc(relative_csv_path: str):
         """
-        Initializes the Git repo inside the container, pulls DVC config,
+        Initializes Git repo if needed, ALWAYS pulls latest changes,
         and then runs 'dvc add' on the CSV file.
         """
-        print("--- Task 4: Initializing Git Repo and Versioning data with DVC ---")
+        print("--- Task 4: Initializing/Syncing Git Repo and Versioning data with DVC ---")
         
         # Get GitHub credentials
         github_pat = Variable.get("GITHUB_PAT")
@@ -116,21 +116,31 @@ def apod_pipeline():
             run_git_command(['git', 'init', '-b', 'main'])
             run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'])
             run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'])
-            run_git_command(['git', 'remote', 'add', 'origin', push_url])
-            
-            # Pull the .dvc folder from the repo
-            try:
-                # We use pull --allow-unrelated-histories in case the init created a different root
-                run_git_command(['git', 'pull', 'origin', 'main', '--allow-unrelated-histories'])
-                print("Successfully pulled .dvc config from repo.")
-            except subprocess.CalledProcessError as e:
-                print(f"Git pull failed (maybe new repo?): {e.stderr}")
-                # We need to run dvc init if the pull failed to bring it
-                if not os.path.exists(os.path.join(PROJECT_ROOT, ".dvc")):
-                    print("No .dvc folder. Running 'dvc init'...")
-                    run_git_command(['dvc', 'init'])
-        
-        # 2. Now, run 'dvc add'
+            # We add the remote but don't use the secret-filled push_url
+            # The 'run_git_command' helper will use the push_url for push/pull
+            run_git_command(['git', 'remote', 'add', 'origin', f"https://{github_repo}"])
+
+        # 2. *** THE FIX ***
+        # ALWAYS pull from the remote repo to sync before doing work.
+        # Use --rebase to put our new commit on top of remote changes.
+        print("Pulling latest changes from origin/main with rebase...")
+        try:
+            # Use 'origin' as the remote name, not the full URL
+            run_git_command(['git', 'pull', 'origin', 'main', '--rebase'])
+            print("Successfully pulled and rebased.")
+        except subprocess.CalledProcessError as e:
+            # This might fail if the repo is new and 'main' doesn't exist yet
+            if "couldn't find remote ref main" in e.stderr:
+                print("Remote 'main' branch probably doesn't exist yet. Skipping pull.")
+            # Or if the .dvc config wasn't pulled yet
+            elif not os.path.exists(os.path.join(PROJECT_ROOT, ".dvc")):
+                print("No .dvc folder. Running 'dvc init'...")
+                run_git_command(['dvc', 'init'])
+            else:
+                print(f"Git pull failed: {e.stderr}")
+                raise # Re-raise other errors
+
+        # 3. Now, run 'dvc add'
         print(f"Running 'dvc add {relative_csv_path}'")
         run_git_command(['dvc', 'add', relative_csv_path])
         print("Successfully ran 'dvc add'")
