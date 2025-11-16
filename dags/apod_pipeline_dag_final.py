@@ -95,91 +95,70 @@ def apod_pipeline():
         print(f"Successfully saved data to {CSV_PATH}")
         return CSV_RELATIVE_PATH
 
-    # --- Task 4: Data Versioning (DVC) ---
+    # --- Task 4 & 5 Combined: Version and Push ---
     @task
-    def version_data_with_dvc(relative_csv_path: str):
+    def version_data_and_code(relative_csv_path: str):
         """
-        Initializes Git repo if needed, ALWAYS pulls latest changes,
-        and then runs 'dvc add' on the CSV file.
+        Initializes Git, stashes local files, pulls, runs dvc add,
+        commits, and pushes the .dvc file.
+        This combines both versioning tasks to avoid Git conflicts.
         """
-        print("--- Task 4: Initializing/Syncing Git Repo and Versioning data with DVC ---")
+        print("--- Task 4/5: Versioning Data and Pushing to Git ---")
         
-        # Get GitHub credentials
+        # 1. Get GitHub credentials
         github_pat = Variable.get("GITHUB_PAT")
         github_user = Variable.get("GITHUB_USER")
         github_repo = Variable.get("GITHUB_REPO_URL")
         push_url = f"https://{github_user}:{github_pat}@{github_repo}"
 
-        # 1. Check if .git exists. If not, initialize the repo.
+        # 2. Initialize Git if needed
         if not os.path.exists(os.path.join(PROJECT_ROOT, ".git")):
             print("No .git directory found. Initializing Git repo...")
             run_git_command(['git', 'init', '-b', 'main'])
             run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'])
             run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'])
-            # We add the remote but don't use the secret-filled push_url
-            # The 'run_git_command' helper will use the push_url for push/pull
-            run_git_command(['git', 'remote', 'add', 'origin', f"https://{github_repo}"])
+            run_git_command(['git', 'remote', 'add', 'origin', push_url])
+        
+        # 3. Set remote URL (in case it's wrong) and STASH
+        # This is the fix for the "untracked files" error
+        print("Setting remote URL and stashing local files...")
+        run_git_command(['git', 'remote', 'set-url', 'origin', push_url])
+        run_git_command(['git', 'stash', '--include-untracked'], check=False)
 
-        # 2. *** THE FIX ***
-        # ALWAYS pull from the remote repo to sync before doing work.
-        # Use --rebase to put our new commit on top of remote changes.
+        # 4. Pull latest changes
         print("Pulling latest changes from origin/main with rebase...")
         try:
-            # Use 'origin' as the remote name, not the full URL
             run_git_command(['git', 'pull', 'origin', 'main', '--rebase'])
             print("Successfully pulled and rebased.")
         except subprocess.CalledProcessError as e:
-            # This might fail if the repo is new and 'main' doesn't exist yet
             if "couldn't find remote ref main" in e.stderr:
                 print("Remote 'main' branch probably doesn't exist yet. Skipping pull.")
-            # Or if the .dvc config wasn't pulled yet
-            elif not os.path.exists(os.path.join(PROJECT_ROOT, ".dvc")):
-                print("No .dvc folder. Running 'dvc init'...")
-                run_git_command(['dvc', 'init'])
             else:
                 print(f"Git pull failed: {e.stderr}")
-                raise # Re-raise other errors
+                raise
 
-        # 3. Now, run 'dvc add'
+        # 5. Run 'dvc add'
         print(f"Running 'dvc add {relative_csv_path}'")
         run_git_command(['dvc', 'add', relative_csv_path])
         print("Successfully ran 'dvc add'")
-        return DVC_FILE_PATH
-
-    # --- Task 5: Code Versioning (Git/GitHub) ---
-    @task
-    def version_code_with_git(dvc_file: str):
-        """
-        Commits and pushes the updated .dvc metadata file to GitHub.
-        """
-        print("--- Task 5: Committing .dvc file to Git ---")
         
-        # Get GitHub credentials
-        github_pat = Variable.get("GITHUB_PAT")
-        github_user = Variable.get("GITHUB_USER")
-        github_repo = Variable.get("GITHUB_REPO_URL")
-        push_url = f"https://{github_user}:{github_pat}@{github_repo}"
-
-        # Git config should be set by the previous task, but we check
-        run_git_command(['git', 'config', '--global', 'user.email', 'airflow@example.com'], check=False)
-        run_git_command(['git', 'config', '--global', 'user.name', 'Airflow-Bot'], check=False)
-
-        # 1. Add the .dvc file
-        run_git_command(['git', 'add', dvc_file])
+        # 6. Add and Commit the .dvc file
+        print("Adding and committing .dvc file...")
+        run_git_command(['git', 'add', DVC_FILE_PATH])
         
-        # 2. Commit
-        commit_message = f"Data: Update APOD data for {pendulum.today().to_date_string()}"
         # Check if there's anything to commit
         status_result = subprocess.run(['git', 'status', '--porcelain'], cwd=PROJECT_ROOT, capture_output=True, text=True)
-        if dvc_file not in status_result.stdout:
+        if DVC_FILE_PATH not in status_result.stdout:
             print("No data changes to commit.")
             return
 
+        commit_message = f"Data: Update APOD data for {pendulum.today().to_date_string()}"
         run_git_command(['git', 'commit', '-m', commit_message])
         
-        # 3. Push to GitHub
-        run_git_command(['git', 'push', push_url, 'main'])
-        print(f"Successfully committed and pushed {dvc_file} to GitHub.")
+        # 7. Push to GitHub
+        print("Pushing commit to GitHub...")
+        run_git_command(['git', 'push', 'origin', 'main'])
+        print(f"Successfully committed and pushed {DVC_FILE_PATH} to GitHub.")
 
     # --- Define Task Dependencies ---
     raw_data = extract_apod_data()
@@ -188,10 +167,11 @@ def apod_pipeline():
     pg_load_task = load_to_postgres(clean_df)
     csv_path_task = load_to_csv(clean_df)
 
-    dvc_file_task = version_data_with_dvc(csv_path_task)
+    # NEW: Call the single, combined task
+    version_task = version_data_and_code(csv_path_task)
     
-    git_task = version_code_with_git(dvc_file_task)
-    git_task.set_upstream(pg_load_task)
+    # Make sure versioning only happens after the CSV and PG load are done
+    version_task.set_upstream(pg_load_task)
 
 
 # Instantiate the DAG
