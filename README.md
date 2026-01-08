@@ -1,45 +1,59 @@
-Overview
-========
+# Project Report: End-to-End MLOps Pipeline for NASA APOD
 
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+**Author:** Abdullah (22i-2515)  
+**Date:** 2025-11-16  
+**Platform:** Astronomer (Astro) Cloud  
+**Status:** Successful
 
-Project Contents
-================
+**Executive Summary**
+- **Summary:** Automated daily MLOps pipeline that fetches NASA APOD, stores it in Supabase Postgres, and versions data with DVC and GitHub. Deployed and stabilized on Astro Cloud (Dag Version v4).
 
-Your Astro project contains the following files and folders:
+**Project Objective**
+- **Goal:** Daily automated ETL + data & code versioning for NASA APOD.
+- **Steps:** Extract → Transform → Load (Supabase & CSV) → DVC add → Git commit & push.
 
-- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
-    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
-- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
-- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
-- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
-- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
-- plugins: Add custom or community plugins for your project to this file. It is empty by default.
-- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+**Architecture**
+- **Orchestration:** Apache Airflow (Astro Cloud) DAG (v4).  
+- **Integrations:** NASA APOD API, Supabase Postgres, DVC, GitHub.
 
-Deploy Your Project Locally
-===========================
+**DAG Tasks**
+- **extract_apod_data:** GET NASA APOD API; returns JSON via XCom.  
+- **transform_apod_data:** Select fields (date, title, url, explanation), build single-row pandas.DataFrame.  
+- **load_to_postgres:** Upsert into Supabase `apod_data` table (date primary key).  
+- **load_to_csv:** Save to `data/apod_data.csv` on worker filesystem.  
+- **version_data_and_code:** Idempotent Git + DVC workflow: sync remote, `dvc add`, `git add/commit/push`.
 
-Start Airflow on your local machine by running 'astro dev start'.
+**Deployment Notes & Debugging**
+- **Networking:** Resolved IPv6/IPv4 incompatibility by using Supabase connection pooler IPv4 endpoint.  
+- **Git State Handling:** Final robust approach: force-sync worker with `git fetch` + `git reset --hard origin/main` (handles untracked/stale state).
 
-This command will spin up five Docker containers on your machine, each for a different Airflow component:
+**Evidence**
+Below are placeholders for images that demonstrate successful runs and visibility. Place images in `images/` and update paths as needed.
 
-- Postgres: Airflow's Metadata Database
-- Scheduler: The Airflow component responsible for monitoring and triggering tasks
-- DAG Processor: The Airflow component responsible for parsing DAGs
-- API Server: The Airflow component responsible for serving the Airflow UI and API
-- Triggerer: The Airflow component responsible for triggering deferred tasks
+- Image 1 — Successful DAG Run:
+<img width="464" height="214" alt="{808ED626-63F6-41B5-AAEC-71C908D43B36}" src="https://github.com/user-attachments/assets/ba3531f5-3e7e-44f5-8d16-0ee990f6e8bb" />
 
-When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+- Image 2 — Automated GitHub Commits:
+<img width="464" height="185" alt="{16161840-EFD4-4E36-B8E2-4AC5ED985E33}" src="https://github.com/user-attachments/assets/78c9689e-bff8-44bc-9a96-ff6d9e7e055b" />
 
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
+- Image 3 — Astro Cloud Deployments:
+<img width="465" height="203" alt="{F13C4CBF-D060-4854-B0F1-288F55497C39}" src="https://github.com/user-attachments/assets/058f3fc5-5a8f-4d09-a8cd-b58af555f0a0" />
 
-Deploy Your Project to Astronomer
-=================================
 
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+**Quick Usage**
+- **Credentials:** Store `GITHUB_PAT`, Supabase credentials, and other secrets as Airflow Variables/Connections in Astro.  
+- **File:** The DAG and scripts are expected under the project repo; the CSV output is `data/apod_data.csv`.  
+- **Versioning Flow:** The DAG's final task runs `dvc add data/apod_data.csv` then commits the `.dvc` file and pushes to `origin/main`.
 
-Contact
-=======
+**Key Learnings**
+- Git in ephemeral workers is fragile — prefer force-sync from remote.  
+- Verify network stack (IPv4/IPv6) between managed services.  
+- Iterative debugging and test-deploy cycles are essential.
 
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+**Links & Access**
+- **Airflow UI:** (private to Astro workspace) Provide Astro workspace access to view.  
+- **Astro Deployment:** (private) Provide deployment URL to authorized users.
+
+**Contact**
+- **Author:** Abdullah — for access requests or questions.
+
